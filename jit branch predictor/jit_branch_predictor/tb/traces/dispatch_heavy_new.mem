@@ -1,0 +1,8 @@
+00A00113 // x2 = 10
+00100093 // x1 = 1
+00000463 // BEQ x0, x0, +8 (Always T)
+00108463 // BEQ x1, x0, +8 (Always NT)
+00000463 // BEQ x0, x0, +8 (Always T)
+00108463 // BEQ x1, x0, +8 (Always NT)
+FFF10113 // x2 = x2 - 1
+FE0110E3 // BNE x2, x0, loop-back
