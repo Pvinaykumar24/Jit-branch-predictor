@@ -178,12 +178,15 @@ module top #(
         .predicted_taken(predicted_taken));
 
     // ── Performance Counters ─────────────────────────────────────────
+    // flush = branch misprediction → 2 wasted cycles (IF+ID bubbles)
+    // stall = load-use hazard     → 1 wasted cycle
+    // flush takes priority; both cannot cause double-count in same cycle
     always @(posedge clk or posedge rst) begin
         if (rst) begin
-            total_cycles        <= 0;
-            total_branches      <= 0;
+            total_cycles         <= 0;
+            total_branches       <= 0;
             total_mispredictions <= 0;
-            total_stalls        <= 0;
+            total_stalls         <= 0;
         end else begin
             total_cycles <= total_cycles + 1;
             if (ex_is_branch) begin
@@ -191,8 +194,10 @@ module top #(
                 if (mispredicted)
                     total_mispredictions <= total_mispredictions + 1;
             end
-            if (stall || flush)
-                total_stalls <= total_stalls + 1;
+            if (flush)
+                total_stalls <= total_stalls + 2; // 2-cycle flush penalty
+            else if (stall)
+                total_stalls <= total_stalls + 1; // 1-cycle stall penalty
         end
     end
 endmodule
