@@ -1,0 +1,97 @@
+\documentclass{beamer}
+\usetheme{Madrid}
+\usecolortheme{default}
+
+\title[JIT Branch Predictor]{JIT Branch Predictor Simulation \& Analysis}
+\subtitle{Bridging Software Patterns and Hardware Prediction}
+\author{Your Name} % Replace with your name(s)
+\institute{Course Name / University} % Replace with your institution
+\date{\today}
+
+\begin{document}
+
+\begin{frame}
+  \titlepage
+\end{frame}
+
+\begin{frame}{Problem Statement}
+  \begin{itemize}
+    \item \textbf{Software Bottleneck:} Modern interpreted languages (like Python) execute instructions through massive interpreter loops, leading to unpredictable branch behaviors and frequent pipeline flushes.
+    \item \textbf{Hardware Disconnect:} Traditional branch predictors struggle with the erratic "overhead" branches introduced by software interpreters.
+    \item \textbf{The Gap:} There is a lack of clear visualization on how Just-In-Time (JIT) compilation optimizes code specifically for hardware-level branch predictors (like 1-bit, 2-bit, and GShare) to maximize Instructions Per Cycle (IPC).
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Your Idea}
+  \begin{itemize}
+    \item \textbf{Integrated Simulation:} Build an end-to-end simulation environment that analyzes high-level code (Python/C/Java) and generates RISC-V instruction traces.
+    \item \textbf{Dual-Trace Comparison:} Generate two distinct traces for the same code:
+      \begin{itemize}
+        \item \textit{Naive Trace:} Models standard interpreter overhead.
+        \item \textit{JIT-Optimized Trace:} Models compiled, loop-hoisted code with clean backward branches and inline caches.
+      \end{itemize}
+    \item \textbf{Hardware Evaluation:} Run these traces through a custom Verilog 5-stage pipeline with selectable hardware branch predictors to demonstrate quantifiable performance gains.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Implementation: System Architecture}
+  \begin{itemize}
+    \item \textbf{Frontend Application:} Web-based UI for code input and real-time metric visualization.
+    \item \textbf{Code Analyzer:} Python backend utilizes Abstract Syntax Trees (AST) to detect loops, type checks, and if-else chains.
+    \item \textbf{Trace Generator:} Converts the analyzed code constructs into synthetic RISC-V machine code traces mimicking realistic branch behaviors.
+    \item \textbf{Verilog Backend:} A full 5-stage classic RISC-V processor pipeline (IF, ID, EX, MEM, WB) implemented in Verilog.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Implementation: Hardware Pipeline \& Predictors}
+  \begin{itemize}
+    \item \textbf{Pipeline Features:} 
+      \begin{itemize}
+        \item Hazard detection unit and data forwarding.
+        \item PC+4 pre-fetching and pipeline flush control on mispredictions.
+      \end{itemize}
+    \item \textbf{Branch Predictors Integrated:}
+      \begin{itemize}
+        \item \textbf{Static:} Always predicts "Not-Taken".
+        \item \textbf{1-Bit:} Simple history table.
+        \item \textbf{2-Bit:} Saturating counter (Strongly/Weakly Taken/Not-Taken) to reduce aliasing.
+        \item \textbf{GShare (GHR):} Global History Register XORed with PC to perfectly predict correlated branches (e.g., polymorphic inline caches).
+      \end{itemize}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Implementation: The Workflow}
+  \begin{enumerate}
+    \item \textbf{Code Input:} User pastes code into the UI.
+    \item \textbf{Analysis:} System identifies hot paths and branch chains.
+    \item \textbf{Simulation:} Traces are compiled and fed into Icarus Verilog (\texttt{iverilog}).
+    \item \textbf{Execution:} The \texttt{vvp} simulation runs across all predictors.
+    \item \textbf{Reporting:} Results (Misprediction Rate, Wasted Cycles, IPC) are exported via CSV back to the frontend for charting.
+  \end{enumerate}
+\end{frame}
+
+\begin{frame}{Challenges Faced}
+  \begin{itemize}
+    \item \textbf{Realistic Trace Generation:} Initially, unrolled one-shot instruction traces resulted in artificial 100\% misprediction rates. We had to engineer realistic looping patterns to allow predictors to "learn."
+    \item \textbf{GShare Optimization:} Achieving maximum IPC required refining the Tournament Predictor with speculative GHR update logic and integrating a Branch Target Buffer (BTB).
+    \item \textbf{Cross-Stack Integration:} Seamlessly connecting a web frontend, Python AST parsing, and low-level Verilog simulation pipelines into a single asynchronous user experience.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Results}
+  \begin{itemize}
+    \item \textbf{Predictor Accuracy:} GShare consistently outperformed 1-bit and 2-bit predictors, especially on highly correlated branches.
+    \item \textbf{JIT vs Naive:} JIT-optimized traces demonstrated significantly higher IPC and lower misprediction rates compared to interpreter (naive) traces.
+    \item \textbf{Visual Proof:} The simulation successfully proves that JIT compilation combined with advanced hardware prediction drastically reduces wasted CPU cycles.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \begin{center}
+    \Huge Thank You! \\
+    \vspace{0.5cm}
+    \Large Questions?
+  \end{center}
+\end{frame}
+
+\end{document}
