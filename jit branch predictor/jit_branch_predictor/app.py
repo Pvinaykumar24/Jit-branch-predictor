@@ -50,27 +50,62 @@ VERILOG_FILES = [
     "memory/data_mem.v",
 ]
 
-TAKEN     = "00000463"   # BEQ x0,x0,+8  -> always TAKEN
-NOT_TAKEN = "00100063"   # BEQ x0,x1,+0  -> never TAKEN
-NOP       = "00000013"   # ADDI x0,x0,0
+TAKEN     = "00000463"   # BEQ x0,x0,+8  -> always TAKEN  (x0==x0 always true, BEQ)
+NOT_TAKEN = "00001063"   # BNE x0,x0,+0  -> never TAKEN   (x0!=x0 always false, BNE)
+NOP       = "00000013"   # ADDI x0,x0,0  -> no-op
 
 # ─────────────────────────────────────────────────────────────
 # Code Analysis
 # ─────────────────────────────────────────────────────────────
 def analyze_code(code):
+    """
+    Analyzes source code to extract branch-relevant patterns.
+    Returns a dict with detected constructs and their complexity.
+    Also classifies each for-loop as 'sorted' (predictable) or 'random' (unpredictable)
+    based on whether sorted()/random.shuffle() calls appear near the loop.
+    """
     result = {
         "for_loops": [], "while_loops": 0, "if_chains": [],
-        "isinstance_calls": 0, "try_blocks": 0, "language": "unknown", "errors": [],
+        "isinstance_calls": 0, "try_blocks": 0, "language": "unknown",
+        "errors": [], "has_sorting": False, "has_shuffle": False,
+        "nested_loops": 0,
     }
     try:
         tree = ast.parse(code)
         result["language"] = "Python"
+
+        # Detect sorting / shuffle calls anywhere in the code
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func = node.func
+                name = (func.id if isinstance(func, ast.Name)
+                        else func.attr if isinstance(func, ast.Attribute) else "")
+                if name in ("sorted", "sort"):
+                    result["has_sorting"] = True
+                if name in ("shuffle", "sample", "randint", "random", "choice"):
+                    result["has_shuffle"] = True
+                if name in ("isinstance", "type", "issubclass"):
+                    result["isinstance_calls"] += 1
+            elif isinstance(node, ast.Try):
+                result["try_blocks"] += 1
+
+        # Walk for loops and if-chains
+        def _count_for_depth(node, depth=0):
+            """Count max nesting depth of For loops."""
+            if isinstance(node, ast.For):
+                depth += 1
+            best = depth
+            for child in ast.iter_child_nodes(node):
+                best = max(best, _count_for_depth(child, depth))
+            return best
+
         for node in ast.walk(tree):
             if isinstance(node, ast.For):
                 iters = 10
                 if isinstance(node.iter, ast.Call):
                     func = node.iter.func
-                    fname = func.id if isinstance(func, ast.Name) else (func.attr if isinstance(func, ast.Attribute) else "")
+                    fname = (func.id if isinstance(func, ast.Name)
+                             else func.attr if isinstance(func, ast.Attribute) else "")
                     if fname == "range":
                         args = node.iter.args
                         try:
@@ -82,45 +117,55 @@ def analyze_code(code):
                                     iters = int(b.value) - int(a.value)
                         except Exception:
                             pass
-                result["for_loops"].append(min(max(iters, 2), 20))
+                result["for_loops"].append(min(max(iters, 2), 16))
             elif isinstance(node, ast.While):
                 result["while_loops"] += 1
             elif isinstance(node, ast.If):
                 chain = 1
                 curr = node
-                while curr.orelse and len(curr.orelse) == 1 and isinstance(curr.orelse[0], ast.If):
+                while (curr.orelse and len(curr.orelse) == 1
+                       and isinstance(curr.orelse[0], ast.If)):
                     chain += 1
                     curr = curr.orelse[0]
                 result["if_chains"].append(chain)
-            elif isinstance(node, ast.Call):
-                func = node.func
-                name = func.id if isinstance(func, ast.Name) else (func.attr if isinstance(func, ast.Attribute) else "")
-                if name in ("isinstance", "type", "issubclass"):
-                    result["isinstance_calls"] += 1
-            elif isinstance(node, ast.Try):
-                result["try_blocks"] += 1
+
+        # Detect nested loops (increases overhead)
+        result["nested_loops"] = max(0, _count_for_depth(tree) - 1)
         return result
-    except SyntaxError:
-        pass
+    except SyntaxError as e:
+        py_err = f"Python Syntax Error: {e.msg} at line {e.lineno}"
+
+    # ── C / Java fallback ──────────────────────────────────────
+    # Check if it looks like C/Java. If not, return the Python error instead of silently falling back.
+    if not re.search(r'#include|int\s+main|void\s+|public\s+class|\{', code):
+        return {"error": py_err}
 
     result["language"] = "C/Java"
     for _ in re.findall(r'\bfor\b\s*\(', code):
         result["for_loops"].append(8)
     result["while_loops"] = len(re.findall(r'\bwhile\b\s*\(', code))
     lines = code.splitlines()
-    chain, in_chain = 0, False
+    chain = 0
     for line in lines:
         s = line.strip()
         if re.match(r'^(if)\s*[\(\s]', s):
-            if chain > 0: result["if_chains"].append(chain)
+            if chain > 0:
+                result["if_chains"].append(chain)
             chain = 1
         elif re.match(r'^else\s+if\s*\(|^elif\s', s):
             chain += 1
         elif chain > 0 and not re.match(r'^else\b', s) and s:
-            result["if_chains"].append(chain); chain = 0
-    if chain > 0: result["if_chains"].append(chain)
-    result["isinstance_calls"] = len(re.findall(r'\b(instanceof|isinstance|getClass|typeOf)\b', code))
+            result["if_chains"].append(chain)
+            chain = 0
+    if chain > 0:
+        result["if_chains"].append(chain)
+    result["isinstance_calls"] = len(
+        re.findall(r'\b(instanceof|isinstance|getClass|typeOf)\b', code))
     result["try_blocks"] = len(re.findall(r'\btry\b\s*\{?', code))
+    if re.search(r'\b(sort|Arrays\.sort|Collections\.sort)\b', code):
+        result["has_sorting"] = True
+    if re.search(r'\b(shuffle|random|rand)\b', code):
+        result["has_shuffle"] = True
     return result
 
 # ─────────────────────────────────────────────────────────────
@@ -131,56 +176,98 @@ def _pad(instructions):
         instructions.append(NOP)
     return instructions[:256]
 
+
+def _alt(i):
+    """Alternating branch: even=TAKEN, odd=NOT_TAKEN."""
+    return TAKEN if i % 2 == 0 else NOT_TAKEN
+
+
 def generate_naive_trace(analysis):
+    """
+    COA NAIVE TRACE (Interpreter Model)
+    Python interpreter executes a massive switch statement (dispatch loop).
+    Every logical operation has 3-4 unpredictable overhead branches.
+    """
     instr = []
+    c = [0]
+    def alt():
+        v = TAKEN if c[0] % 2 == 0 else NOT_TAKEN
+        c[0] += 1
+        return v
+
     for iters in analysis["for_loops"]:
-        for i in range(iters):
-            instr += [NOP, NOP, TAKEN]
-        instr.append(NOT_TAKEN)
+        for i in range(max(iters, 2)):
+            # Interpreter overhead: Fetch, Decode, Type Check
+            instr += [NOP, alt(), NOP, alt(), NOP, alt()]
+            # Logical branch
+            instr += [NOP, NOP, TAKEN if i < max(iters, 2) - 1 else NOT_TAKEN]
+
     for _ in range(analysis["while_loops"]):
         for i in range(8):
-            instr += [NOP, TAKEN]
-        instr.append(NOT_TAKEN)
+            instr += [NOP, alt(), NOP, alt()]
+            instr += [NOP, TAKEN if i < 7 else NOT_TAKEN]
+
     for chain_len in analysis["if_chains"]:
-        for i in range(max(chain_len, 1)):
-            instr.append(NOP)
-            instr.append(TAKEN if i % 2 == 0 else NOT_TAKEN)
+        for _ in range(max(chain_len, 1)):
+            instr += [NOP, alt(), NOP, alt()]
+            instr += [NOP, alt()]
+
     for _ in range(analysis["isinstance_calls"]):
-        instr += [NOP, TAKEN, NOT_TAKEN]
+        instr += [NOP, alt(), NOP, alt(), NOP, alt(), NOP, alt()]
+
     for _ in range(analysis["try_blocks"]):
-        instr += [NOP, NOP, NOT_TAKEN]
+        instr += [NOP, alt(), NOP, alt()]
+
     if len(instr) < 10:
-        for i in range(40):
-            instr.append(NOP)
-            instr.append(TAKEN if i % 3 != 0 else NOT_TAKEN)
+        for _ in range(16):
+            instr += [NOP, NOP, alt()]
+
     return _pad(instr)
 
 def generate_jit_trace(analysis):
+    """
+    COA JIT-OPTIMIZED TRACE
+    Models JIT compiled code:
+    1. Loop overhead is gone. Backward branches remain but are clean.
+    2. Polymorphic Inline Caches (PICs) for type checks: correlated branches
+       that alternate, defeating Static/2-bit but perfectly predicted by GHR.
+    """
     instr = []
+    c = [0]
+    def alt():
+        v = TAKEN if c[0] % 2 == 0 else NOT_TAKEN
+        c[0] += 1
+        return v
+
     for iters in analysis["for_loops"]:
-        for i in range(iters):
-            instr.append(NOP)
-            instr.append(TAKEN)
-        instr.append(NOT_TAKEN)
+        n = max(iters, 2)
+        for i in range(n):
+            instr += [NOP, NOP, NOP]
+            # Clean backward branch
+            instr.append(TAKEN if i < n - 1 else NOT_TAKEN)
+
     for _ in range(analysis["while_loops"]):
         for i in range(8):
-            instr.append(NOP)
-            instr.append(TAKEN)
-        instr.append(NOT_TAKEN)
-    for _ in range(analysis["isinstance_calls"]):
-        instr += [NOP, NOT_TAKEN]
+            instr += [NOP, NOP]
+            instr.append(TAKEN if i < 7 else NOT_TAKEN)
+
     for chain_len in analysis["if_chains"]:
         for _ in range(max(chain_len, 1)):
-            instr.append(NOP)
-            instr.append(TAKEN)
+            # Complex data-dependent branch
+            instr += [NOP, alt()]
+
+    for _ in range(analysis["isinstance_calls"]):
+        # Polymorphic Inline Cache (PIC) checks
+        instr += [NOP] * 63 + [alt()]
+
     for _ in range(analysis["try_blocks"]):
+        # Zero-cost exceptions (no branch on hot path)
         instr += [NOP, NOT_TAKEN]
+
     if len(instr) < 10:
-        for i in range(50):
-            instr.append(NOP)
-            instr.append(TAKEN)
-        for i in range(10):
-            instr += [NOP, NOT_TAKEN]
+        for _ in range(16):
+            instr += [NOP, alt()]
+
     return _pad(instr)
 
 def write_trace(path, instructions):
@@ -238,7 +325,13 @@ def count_branch_stats(instructions):
     }
 
 def simulate(code):
+    if not code.strip():
+        return {"error": "Input code is empty. Please provide valid Python, C, or Java code."}
+
     analysis   = analyze_code(code)
+    if "error" in analysis:
+        return analysis
+
     naive_trace = generate_naive_trace(analysis)
     jit_trace   = generate_jit_trace(analysis)
     os.makedirs(TRACE_DIR, exist_ok=True)
@@ -652,15 +745,34 @@ function render(data) {
   function fV(arr, pred, field) { const r = arr.find(x => x.predictor === pred); return r ? parseFloat(r[field]||0) : 0; }
   function fI(arr, pred, field) { const r = arr.find(x => x.predictor === pred); return r ? parseInt(r[field]||0)   : 0; }
 
-  const naiveIPC   = PREDS.map(p => fV(NR, p, 'ipc'));
-  const jitIPC     = PREDS.map(p => fV(JR, p, 'ipc'));
-  const speedups   = PREDS.map((p,i) => naiveIPC[i]>0 ? jitIPC[i]/naiveIPC[i] : 1.0);
-  const naiveMisp  = PREDS.map(p => fV(NR, p, 'mispredict_rate'));
-  const jitMisp    = PREDS.map(p => fV(JR, p, 'mispredict_rate'));
-  const naiveWaste = PREDS.map(p => fI(NR, p, 'wasted_cycles'));
-  const jitWaste   = PREDS.map(p => fI(JR, p, 'wasted_cycles'));
-  const bestSU     = Math.max(...speedups);
-  const bestPred   = PREDS[speedups.indexOf(bestSU)];
+  const LABELS = ['Normal Compilation', 'JIT + Static', 'JIT + 1-Bit', 'JIT + 2-Bit', 'JIT + GShare'];
+  const COLORS_5 = ['#FF4466', '#8896BB', '#FF9944', '#00D4AA', '#44BBFF'];
+  const BG_COLORS_5 = ['rgba(255,68,102,.7)', 'rgba(136,150,187,.7)', 'rgba(255,153,68,.7)', 'rgba(0,212,170,.7)', 'rgba(68,187,255,.7)'];
+
+  const getMetricV = (field) => [
+    fV(NR, 'Static', field),
+    fV(JR, 'Static', field),
+    fV(JR, '1-Bit', field),
+    fV(JR, '2-Bit', field),
+    fV(JR, 'GHR', field)
+  ];
+  
+  const getMetricI = (field) => [
+    fI(NR, 'Static', field),
+    fI(JR, 'Static', field),
+    fI(JR, '1-Bit', field),
+    fI(JR, '2-Bit', field),
+    fI(JR, 'GHR', field)
+  ];
+
+  const ipcData = getMetricV('ipc');
+  const mispData = getMetricV('mispredict_rate');
+  const wasteData = getMetricI('wasted_cycles');
+  
+  const baseIPC = ipcData[0] || 1;
+  const speedups = ipcData.map(v => v / baseIPC);
+  const bestSU = Math.max(...speedups);
+  const bestLabel = LABELS[speedups.indexOf(bestSU)];
 
   // ── 1. Analysis Summary Cards ─────────────────────
   const loopC = (analysis.for_loops||[]).length + (analysis.while_loops||0);
@@ -669,7 +781,7 @@ function render(data) {
 
   add(rp, `
   <div class="card">
-    <div class="card-hdr"><div class="dot" style="background:#7C6FFF"></div>Code Analysis &amp; Simulation Summary</div>
+    <div class="card-hdr"><div class="dot" style="background:#7C6FFF"></div>Hardware Acceleration Summary</div>
     <div class="card-body">
       <div class="stat-row">
         <div class="stat-tile">
@@ -692,14 +804,14 @@ function render(data) {
           <div class="st-sub">isinstance etc</div>
         </div>
         <div class="stat-tile">
-          <div class="st-label">Branch density</div>
-          <div class="st-val" style="color:#44BBFF">${naive_stats.branch_density}%</div>
-          <div class="st-sub">of 256 instructions</div>
+          <div class="st-label">JIT Fall-Through</div>
+          <div class="st-val" style="color:#44BBFF">${jit_stats.taken_ratio}%</div>
+          <div class="st-sub">branches taken</div>
         </div>
         <div class="stat-tile" style="border-color:rgba(0,212,170,.35);background:rgba(0,212,170,.05)">
-          <div class="st-label">Best JIT speedup</div>
+          <div class="st-label">Max Hardware Speedup</div>
           <div class="st-val" style="color:#00D4AA">${bestSU.toFixed(2)}x</div>
-          <div class="st-sub">${bestPred} predictor</div>
+          <div class="st-sub">${bestLabel}</div>
         </div>
       </div>
     </div>
@@ -719,8 +831,8 @@ function render(data) {
     <div class="chart-card">
       <div class="chart-title">
         <div class="dot" style="background:#44BBFF"></div>
-        JIT Speedup Factor
-        <span class="chart-sub">JIT IPC / Naive IPC</span>
+        Hardware Speedup Factor
+        <span class="chart-sub">relative to Baseline</span>
       </div>
       <div class="chart-wrap"><canvas id="ch-su"></canvas></div>
     </div>
@@ -744,25 +856,27 @@ function render(data) {
 
   /* chart helpers */
   const axOpts = {
-    x: { ticks: { color:'#6B77A0', font:{size:10} }, grid: { color:'rgba(36,40,64,.6)' } },
+    x: { ticks: { color:'#6B77A0', font:{size:10} }, grid: { display:false } },
     y: { ticks: { color:'#6B77A0', font:{size:10} }, grid: { color:'rgba(36,40,64,.6)' } }
   };
   const tipStyle = { backgroundColor:'#161A2E', borderColor:'#242840', borderWidth:1, titleColor:'#DDE4F5', bodyColor:'#6B77A0', padding:10 };
-  const legStyle = { labels:{ color:'#8896BB', font:{size:10}, boxWidth:10, padding:12 } };
 
-  const grouped = (id, naiveData, jitData, yMax, yFmt) => {
+  const singleBar = (id, data, yMax, yFmt) => {
     CH[id] = new Chart(document.getElementById(id), {
       type: 'bar',
       data: {
-        labels: PREDS,
-        datasets: [
-          { label:'Naive (Unoptimized)', data:naiveData, backgroundColor:NAIVE_C, borderColor:'#FF4466', borderWidth:1.5, borderRadius:5 },
-          { label:'JIT-Optimized',       data:jitData,   backgroundColor:JIT_C,   borderColor:'#00D4AA', borderWidth:1.5, borderRadius:5 },
-        ]
+        labels: LABELS,
+        datasets: [{
+          data: data,
+          backgroundColor: BG_COLORS_5,
+          borderColor: COLORS_5,
+          borderWidth: 1.5,
+          borderRadius: 5
+        }]
       },
       options: {
         responsive: true, maintainAspectRatio: false,
-        plugins: { legend: legStyle, tooltip: { ...tipStyle } },
+        plugins: { legend: { display: false }, tooltip: { ...tipStyle } },
         scales: {
           x: axOpts.x,
           y: { ...axOpts.y, max: yMax||undefined, ticks: { ...axOpts.y.ticks, callback: yFmt||undefined } }
@@ -771,49 +885,16 @@ function render(data) {
     });
   };
 
-  // Chart 1: IPC grouped
-  grouped('ch-ipc', naiveIPC, jitIPC, 1.05, v => v.toFixed(2));
-
-  // Chart 2: Speedup single dataset, colored by value
-  CH['ch-su'] = new Chart(document.getElementById('ch-su'), {
-    type: 'bar',
-    data: {
-      labels: PREDS,
-      datasets: [{
-        label: 'Speedup (x)',
-        data: speedups,
-        backgroundColor: speedups.map(s => s>=1.5?'rgba(0,212,170,.8)':s>=1.2?'rgba(68,187,255,.8)':s>=1.05?'rgba(255,153,68,.8)':'rgba(255,68,102,.75)'),
-        borderColor:     speedups.map(s => s>=1.5?'#00D4AA':s>=1.2?'#44BBFF':s>=1.05?'#FF9944':'#FF4466'),
-        borderWidth: 1.5,
-        borderRadius: 5,
-      }]
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      plugins: {
-        legend: { display: false },
-        tooltip: { ...tipStyle, callbacks: { label: ctx => ` Speedup: ${ctx.parsed.y.toFixed(3)}x` } }
-      },
-      scales: {
-        x: axOpts.x,
-        y: { ...axOpts.y, ticks: { ...axOpts.y.ticks, callback: v => v.toFixed(2)+'x' } }
-      }
-    }
-  });
-
-  // Chart 3: Misprediction grouped
-  grouped('ch-misp', naiveMisp, jitMisp, null, v => v.toFixed(0)+'%');
-
-  // Chart 4: Wasted cycles grouped
-  grouped('ch-wc', naiveWaste, jitWaste, null, null);
+  singleBar('ch-ipc', ipcData, 1.05, v => v.toFixed(2));
+  singleBar('ch-su', speedups, null, v => v.toFixed(2)+'x');
+  singleBar('ch-misp', mispData, null, v => v.toFixed(0)+'%');
+  singleBar('ch-wc', wasteData, null, null);
 
   // ── 3. Full Comparison Table ──────────────────────
-  const cHdrs = ['static-hdr hdr-static','bit1-hdr hdr-1bit','bit2-hdr hdr-2bit','ghr-hdr hdr-ghr'];
-
   function tRow(label, vals, fmtFn, chipFn) {
     const cells = vals.map((v,i) => {
       const chip = chipFn ? chipFn(v, i) : '';
-      return `<td style="color:${COLORS[i]}">${fmtFn(v,i)} ${chip}</td>`;
+      return `<td style="color:${COLORS_5[i]}">${fmtFn(v,i)} ${chip}</td>`;
     }).join('');
     return `<tr><td>${label}</td>${cells}</tr>`;
   }
@@ -826,44 +907,32 @@ function render(data) {
 
   const tblHtml = `
   <div class="card">
-    <div class="card-hdr"><div class="dot" style="background:#44BBFF"></div> Full Comparison Table &mdash; All 4 Predictors (JIT vs Naive)</div>
+    <div class="card-hdr"><div class="dot" style="background:#44BBFF"></div> Architecture Progression Table</div>
     <div class="card-body" style="padding:0">
       <div class="tbl-scroll">
         <table>
           <thead>
             <tr>
               <th>Metric</th>
-              <th class="hdr-static">Static</th>
-              <th class="hdr-1bit">1-Bit</th>
-              <th class="hdr-2bit">2-Bit</th>
-              <th class="hdr-ghr">GHR</th>
+              <th style="color:#FF4466">Normal Compilation</th>
+              <th style="color:#8896BB">JIT + Static</th>
+              <th style="color:#FF9944">JIT + 1-Bit</th>
+              <th style="color:#00D4AA">JIT + 2-Bit</th>
+              <th style="color:#44BBFF">JIT + GShare</th>
             </tr>
           </thead>
           <tbody>
-            <tr class="grp"><td colspan="5">Effective IPC (higher is better)</td></tr>
-            ${tRow('Naive IPC', naiveIPC, (v,i) => v.toFixed(4))}
-            ${tRow('JIT IPC',   jitIPC,   (v,i) => v.toFixed(4))}
-            ${tRow('Speedup',   speedups, (v,i) => `<strong>${v.toFixed(3)}x</strong>`, (v,i) => chip('+'+((v-1)*100).toFixed(1)+'%', true))}
+            <tr class="grp"><td colspan="6">Performance</td></tr>
+            ${tRow('Effective IPC', ipcData, (v) => v.toFixed(4))}
+            ${tRow('Speedup vs Base', speedups, (v) => `<strong>${v.toFixed(3)}x</strong>`, (v) => chip('+'+((v-1)*100).toFixed(1)+'%', true))}
 
-            <tr class="grp"><td colspan="5">Misprediction Rate (lower is better)</td></tr>
-            ${tRow('Naive (%)',  naiveMisp, (v,i) => v.toFixed(1)+'%')}
-            ${tRow('JIT (%)',    jitMisp,   (v,i) => v.toFixed(1)+'%')}
-            ${tRow('Reduction', PREDS.map((p,i) => naiveMisp[i]-jitMisp[i]),
-                v => (v>=0?'-':'+') + Math.abs(v).toFixed(1)+'%',
-                (v,i) => chip( (v>=0?'-':'+') + Math.abs(v).toFixed(1)+'%', v>=0) )}
-
-            <tr class="grp"><td colspan="5">Wasted Cycles per 2000 Clock Cycles</td></tr>
-            ${tRow('Naive cycles', naiveWaste, v => v)}
-            ${tRow('JIT cycles',   jitWaste,   v => v)}
-            ${tRow('Saved', PREDS.map((p,i) => naiveWaste[i]-jitWaste[i]),
-                v => (v>=0?'-':'+') + Math.abs(v),
-                (v,i) => chip((v>=0?'-':'+') + Math.abs(v), v>=0))}
-
-            <tr class="grp"><td colspan="5">Branch Statistics (raw counts)</td></tr>
-            ${tRow('Naive branches',    PREDS.map(p => fI(NR,p,'branches')),    v => v)}
-            ${tRow('JIT branches',      PREDS.map(p => fI(JR,p,'branches')),    v => v)}
-            ${tRow('Naive mispred #',   PREDS.map(p => fI(NR,p,'mispredictions')), v => v)}
-            ${tRow('JIT mispred #',     PREDS.map(p => fI(JR,p,'mispredictions')), v => v)}
+            <tr class="grp"><td colspan="6">Mispredictions</td></tr>
+            ${tRow('Miss Rate (%)', mispData, (v) => v.toFixed(1)+'%')}
+            ${tRow('Wasted Cycles', wasteData, v => v)}
+            
+            <tr class="grp"><td colspan="6">Raw Hardware Events (per 2000 cycles)</td></tr>
+            ${tRow('Total Branches', getMetricI('branches'), v => v)}
+            ${tRow('Mispredicted', getMetricI('mispredictions'), v => v)}
           </tbody>
         </table>
       </div>
@@ -875,7 +944,7 @@ function render(data) {
   function colorizeTr(prev) {
     return prev.split('\n').map(ln => {
       if (ln.startsWith('00000463')) return `<span class="tk">${ln}  &larr; TAKEN</span>`;
-      if (ln.startsWith('00100063')) return `<span class="nt">${ln}  &larr; NOT-TAKEN</span>`;
+      if (ln.startsWith('00001063')) return `<span class="nt">${ln}  &larr; NOT-TAKEN</span>`;
       if (ln.startsWith('00000013')) return `<span class="np">${ln}</span>`;
       return ln;
     }).join('\n');
@@ -897,7 +966,7 @@ function render(data) {
       </div>
       <div style="margin-top:10px;font-size:10px;color:#3A4060;display:flex;gap:16px">
         <span><span style="color:#00D4AA">&#x25A0;</span> 00000463 = BEQ x0,x0 (always TAKEN)</span>
-        <span><span style="color:#FF4466">&#x25A0;</span> 00100063 = BEQ x0,x1 (NOT TAKEN)</span>
+        <span><span style="color:#FF4466">&#x25A0;</span> 00001063 = BNE x0,x0 (always NOT-TAKEN)</span>
         <span><span style="color:#252A45">&#x25A0;</span> 00000013 = NOP</span>
       </div>
     </div>
